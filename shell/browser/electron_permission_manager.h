@@ -8,21 +8,28 @@
 #include <memory>
 #include <vector>
 
-#include "base/callback.h"
 #include "base/containers/id_map.h"
+#include "base/functional/callback_forward.h"
+#include "base/values.h"
 #include "content/public/browser/permission_controller_delegate.h"
-#include "gin/dictionary.h"
-
-namespace base {
-class DictionaryValue;
-class Value;
-}  // namespace base
 
 namespace content {
 class WebContents;
 }
 
+namespace gin_helper {
+class Dictionary;
+}  // namespace gin_helper
+
+namespace v8 {
+class Object;
+template <typename T>
+class Local;
+}  // namespace v8
+
 namespace electron {
+
+class ElectronBrowserContext;
 
 class ElectronPermissionManager : public content::PermissionControllerDelegate {
  public:
@@ -34,10 +41,13 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
   ElectronPermissionManager& operator=(const ElectronPermissionManager&) =
       delete;
 
+  using USBProtectedClasses = std::vector<uint8_t>;
+
   using StatusCallback =
       base::OnceCallback<void(blink::mojom::PermissionStatus)>;
   using StatusesCallback = base::OnceCallback<void(
       const std::vector<blink::mojom::PermissionStatus>&)>;
+  using PairCallback = base::OnceCallback<void(base::Value::Dict)>;
   using RequestHandler = base::RepeatingCallback<void(content::WebContents*,
                                                       blink::PermissionType,
                                                       StatusCallback,
@@ -51,63 +61,51 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
   using DeviceCheckHandler =
       base::RepeatingCallback<bool(const v8::Local<v8::Object>&)>;
 
-  // Handler to dispatch permission requests in JS.
-  void SetPermissionRequestHandler(const RequestHandler& handler);
-  void SetPermissionCheckHandler(const CheckHandler& handler);
-  void SetDevicePermissionHandler(const DeviceCheckHandler& handler);
+  using ProtectedUSBHandler = base::RepeatingCallback<USBProtectedClasses(
+      const v8::Local<v8::Object>&)>;
 
-  // content::PermissionControllerDelegate:
-  void RequestPermission(blink::PermissionType permission,
-                         content::RenderFrameHost* render_frame_host,
-                         const GURL& requesting_origin,
-                         bool user_gesture,
-                         StatusCallback callback) override;
+  using BluetoothPairingHandler =
+      base::RepeatingCallback<void(gin_helper::Dictionary, PairCallback)>;
+
   void RequestPermissionWithDetails(blink::PermissionType permission,
                                     content::RenderFrameHost* render_frame_host,
                                     const GURL& requesting_origin,
                                     bool user_gesture,
-                                    const base::DictionaryValue* details,
-                                    StatusCallback callback);
-  void RequestPermissions(const std::vector<blink::PermissionType>& permissions,
-                          content::RenderFrameHost* render_frame_host,
-                          const GURL& requesting_origin,
-                          bool user_gesture,
-                          StatusesCallback callback) override;
-  void RequestPermissionsWithDetails(
-      const std::vector<blink::PermissionType>& permissions,
-      content::RenderFrameHost* render_frame_host,
-      const GURL& requesting_origin,
-      bool user_gesture,
-      const base::DictionaryValue* details,
-      StatusesCallback callback);
-  blink::mojom::PermissionStatus GetPermissionStatusForFrame(
-      blink::PermissionType permission,
-      content::RenderFrameHost* render_frame_host,
-      const GURL& requesting_origin) override;
-  blink::mojom::PermissionStatus GetPermissionStatusForCurrentDocument(
-      blink::PermissionType permission,
-      content::RenderFrameHost* render_frame_host) override;
+                                    base::Value::Dict details,
+                                    StatusCallback response_callback);
+
+  // Handler to dispatch permission requests in JS.
+  void SetPermissionRequestHandler(const RequestHandler& handler);
+  void SetPermissionCheckHandler(const CheckHandler& handler);
+  void SetDevicePermissionHandler(const DeviceCheckHandler& handler);
+  void SetProtectedUSBHandler(const ProtectedUSBHandler& handler);
+  void SetBluetoothPairingHandler(const BluetoothPairingHandler& handler);
+
+  void CheckBluetoothDevicePair(gin_helper::Dictionary details,
+                                PairCallback pair_callback) const;
 
   bool CheckPermissionWithDetails(blink::PermissionType permission,
                                   content::RenderFrameHost* render_frame_host,
                                   const GURL& requesting_origin,
-                                  const base::DictionaryValue* details) const;
+                                  base::Value::Dict details) const;
 
   bool CheckDevicePermission(blink::PermissionType permission,
                              const url::Origin& origin,
-                             const base::Value* object,
-                             content::RenderFrameHost* render_frame_host) const;
+                             const base::Value& object,
+                             ElectronBrowserContext* browser_context) const;
 
   void GrantDevicePermission(blink::PermissionType permission,
                              const url::Origin& origin,
-                             const base::Value* object,
-                             content::RenderFrameHost* render_frame_host) const;
+                             const base::Value& object,
+                             ElectronBrowserContext* browser_context) const;
 
-  void RevokeDevicePermission(
-      blink::PermissionType permission,
-      const url::Origin& origin,
-      const base::Value* object,
-      content::RenderFrameHost* render_frame_host) const;
+  void RevokeDevicePermission(blink::PermissionType permission,
+                              const url::Origin& origin,
+                              const base::Value& object,
+                              ElectronBrowserContext* browser_context) const;
+
+  USBProtectedClasses CheckProtectedUSBClasses(
+      const USBProtectedClasses& classes) const;
 
  protected:
   void OnPermissionResponse(int request_id,
@@ -115,6 +113,10 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
                             blink::mojom::PermissionStatus status);
 
   // content::PermissionControllerDelegate:
+  void RequestPermissions(
+      content::RenderFrameHost* render_frame_host,
+      const content::PermissionRequestDescription& request_description,
+      StatusesCallback callback) override;
   void ResetPermission(blink::PermissionType permission,
                        const GURL& requesting_origin,
                        const GURL& embedding_origin) override;
@@ -122,26 +124,44 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
       blink::PermissionType permission,
       const GURL& requesting_origin,
       const GURL& embedding_origin) override;
+  void RequestPermissionsFromCurrentDocument(
+      content::RenderFrameHost* render_frame_host,
+      const content::PermissionRequestDescription& request_description,
+      base::OnceCallback<
+          void(const std::vector<blink::mojom::PermissionStatus>&)> callback)
+      override;
+  content::PermissionResult GetPermissionResultForOriginWithoutContext(
+      blink::PermissionType permission,
+      const url::Origin& requesting_origin,
+      const url::Origin& embedding_origin) override;
+  blink::mojom::PermissionStatus GetPermissionStatusForCurrentDocument(
+      blink::PermissionType permission,
+      content::RenderFrameHost* render_frame_host,
+      bool should_include_device_status) override;
   blink::mojom::PermissionStatus GetPermissionStatusForWorker(
       blink::PermissionType permission,
       content::RenderProcessHost* render_process_host,
       const GURL& worker_origin) override;
-  SubscriptionId SubscribePermissionStatusChange(
+  blink::mojom::PermissionStatus GetPermissionStatusForEmbeddedRequester(
       blink::PermissionType permission,
-      content::RenderProcessHost* render_process_host,
       content::RenderFrameHost* render_frame_host,
-      const GURL& requesting_origin,
-      base::RepeatingCallback<void(blink::mojom::PermissionStatus)> callback)
-      override;
-  void UnsubscribePermissionStatusChange(SubscriptionId id) override;
+      const url::Origin& requesting_origin) override;
 
  private:
   class PendingRequest;
   using PendingRequestsMap = base::IDMap<std::unique_ptr<PendingRequest>>;
 
+  void RequestPermissionsWithDetails(
+      content::RenderFrameHost* render_frame_host,
+      const content::PermissionRequestDescription& request_description,
+      base::Value::Dict details,
+      StatusesCallback callback);
+
   RequestHandler request_handler_;
   CheckHandler check_handler_;
   DeviceCheckHandler device_permission_handler_;
+  ProtectedUSBHandler protected_usb_handler_;
+  BluetoothPairingHandler bluetooth_pairing_handler_;
 
   PendingRequestsMap pending_requests_;
 };
